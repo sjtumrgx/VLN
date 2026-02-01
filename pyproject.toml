@@ -1,0 +1,61 @@
+[project]
+name = "vln-system"
+version = "0.1.0"
+description = "Vision-Language Navigation System for Quadruped Robots"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [
+    { name = "VLN Team" }
+]
+
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "websockets>=12.0",
+    "opencv-python>=4.9.0",
+    "numpy>=1.26.0",
+    "pillow>=10.2.0",
+    "redis>=5.0.1",
+    "aiosqlite>=0.19.0",
+    "sqlalchemy>=2.0.25",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.26.0",
+    "openai>=1.10.0",
+    "scipy>=1.12.0",
+]
+
+[project.optional-dependencies]
+vllm = [
+    "vllm>=0.6.0",
+    "torch>=2.1.0",
+    "transformers>=4.37.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.1.0",
+    "ipython>=8.20.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
