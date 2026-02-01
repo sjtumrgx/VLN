@@ -84,13 +84,14 @@ class WebSocketClient {
     }
   }
 
-  sendVideoFrame(base64Frame, taskId, instruction) {
+  sendVideoFrame(base64Frame, taskId, instruction, frameSeq = 0) {
     this.send({
       type: 'video_frame',
       task_id: taskId,
       frame: base64Frame,
       instruction: instruction,
       timestamp: Date.now(),
+      frame_seq: frameSeq,
     });
   }
 
@@ -104,6 +105,13 @@ class WebSocketClient {
   ping() {
     this.send({
       type: 'ping',
+    });
+  }
+
+  stopTask(taskId) {
+    this.send({
+      type: 'stop_task',
+      task_id: taskId,
     });
   }
 

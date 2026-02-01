@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import Header from './components/Header'
 import VideoCanvas from './components/VideoCanvas'
@@ -11,12 +11,19 @@ function App() {
   const [wsClient] = useState(() => new WebSocketClient('ws://localhost:8001/ws/video'))
   const [connected, setConnected] = useState(false)
   const [currentTask, setCurrentTask] = useState(null)
+  const currentTaskRef = useRef(null)
+  const videoCanvasRef = useRef(null)
   const [tasks, setTasks] = useState([])
   const [velocity, setVelocity] = useState({ v: 0, w: 0 })
   const [confidence, setConfidence] = useState(0)
   const [modelStatus, setModelStatus] = useState('unknown')
   const [selectedModel, setSelectedModel] = useState('qwen3-vl-8b')
-  const [videoStats, setVideoStats] = useState({ fps: 0, latency: 0 })
+  const [videoStats, setVideoStats] = useState({ fps: 0, latency: 0, inferenceMs: 0 })
+  const [freezeSignal, setFreezeSignal] = useState(0)
+
+  useEffect(() => {
+    currentTaskRef.current = currentTask
+  }, [currentTask])
 
   useEffect(() => {
     // 连接WebSocket
@@ -32,14 +39,22 @@ function App() {
       setConnected(false)
     })
 
-    wsClient.on('navigation_result', (data) => {
-      setVelocity({ v: data.v, w: data.w })
+    const handleUpdate = (data) => {
+      const task = currentTaskRef.current
+      if (!task || data.task_id !== task.id) return
+
+      setVelocity({ v: data.v || 0, w: data.w || 0 })
       setConfidence(data.confidence || 0)
       setVideoStats({
-        fps: data.fps || 0,
-        latency: Math.round(data.latency) || 0
+        fps: data.fps || (data.inference_ms ? 1000 / data.inference_ms : 0),
+        latency: Math.round(data.latency) || 0,
+        inferenceMs: Math.round(data.inference_ms) || 0,
       })
-    })
+    }
+
+    wsClient.on('navigation_update', handleUpdate)
+    // 兼容旧消息（仍可能存在于某些后端版本）
+    wsClient.on('navigation_result', handleUpdate)
 
     // 定期心跳
     const heartbeat = setInterval(() => {
@@ -76,34 +91,56 @@ function App() {
       wsClient.disconnect()
       clearInterval(heartbeat)
       clearInterval(modelCheck)
+      wsClient.off('navigation_update', handleUpdate)
+      wsClient.off('navigation_result', handleUpdate)
     }
   }, [wsClient])
 
   const handleCreateTask = async (instruction) => {
     try {
+      // 方案2：在“发布任务”用户手势中、且在任何 await 之前触发 video.play()，避免 autoplay 限制
+      videoCanvasRef.current?.primeFileVideoForTaskStart?.()
+
       const task = await api.createTask(instruction)
-      setCurrentTask(task)
-      setTasks(prev => [task, ...prev])
+      const runningTask = { ...task, status: 'running', updated_at: new Date().toISOString() }
+      setCurrentTask(runningTask)
+      setTasks(prev => [runningTask, ...prev])
 
       // 绑定任务到WebSocket
       wsClient.bindTask(task.id)
 
-      return task
+      return runningTask
     } catch (err) {
+      videoCanvasRef.current?.rollbackFileVideoToFirstFrame?.()
       console.error('创建任务失败:', err)
       throw err
     }
   }
 
-  const handleStopTask = async () => {
-    if (currentTask) {
-      try {
-        await api.updateTask(currentTask.id, { status: 'completed' })
+  const handleStopTask = async (taskId) => {
+    const id = taskId || currentTask?.id
+    if (!id) return
+
+    const isStoppingCurrent = currentTask?.id === id
+
+    try {
+      wsClient.stopTask(id)
+      await api.updateTask(id, { status: 'stopped' })
+      setTasks(prev => prev.map(t => (
+        t.id === id
+          ? { ...t, status: 'stopped', updated_at: new Date().toISOString() }
+          : t
+      )))
+
+      if (isStoppingCurrent) {
+        setFreezeSignal(prev => prev + 1)
         setCurrentTask(null)
         setVelocity({ v: 0, w: 0 })
-      } catch (err) {
-        console.error('停止任务失败:', err)
+        setConfidence(0)
+        setVideoStats({ fps: 0, latency: 0, inferenceMs: 0 })
       }
+    } catch (err) {
+      console.error('停止任务失败:', err)
     }
   }
 
@@ -131,9 +168,11 @@ function App() {
             transition={{ duration: 0.5 }}
           >
             <VideoCanvas
+              ref={videoCanvasRef}
               wsClient={wsClient}
               currentTask={currentTask}
               stats={videoStats}
+              freezeSignal={freezeSignal}
             />
           </motion.div>
 
@@ -158,7 +197,11 @@ function App() {
 
             {/* Task History */}
             <div className="flex-1 overflow-hidden">
-              <TaskHistory tasks={tasks} currentTaskId={currentTask?.id} />
+              <TaskHistory
+                tasks={tasks}
+                currentTaskId={currentTask?.id}
+                onStopTask={handleStopTask}
+              />
             </div>
           </motion.div>
         </div>

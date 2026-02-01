@@ -4,11 +4,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 const STATUS_CONFIG = {
   pending: { label: '等待中', color: 'text-yellow-400', bg: 'bg-yellow-500/20', border: 'border-yellow-500' },
   running: { label: '运行中', color: 'text-green-400', bg: 'bg-green-500/20', border: 'border-green-500' },
+  stopped: { label: '已停止', color: 'text-gray-300', bg: 'bg-gray-500/20', border: 'border-gray-500' },
   completed: { label: '已完成', color: 'text-blue-400', bg: 'bg-blue-500/20', border: 'border-blue-500' },
   failed: { label: '失败', color: 'text-red-400', bg: 'bg-red-500/20', border: 'border-red-500' },
 }
 
-export default function TaskHistory({ tasks, currentTaskId }) {
+export default function TaskHistory({ tasks, currentTaskId, onStopTask }) {
   const [expanded, setExpanded] = useState(null)
   const [collapsed, setCollapsed] = useState(false)
 
@@ -56,6 +57,7 @@ export default function TaskHistory({ tasks, currentTaskId }) {
                   isExpanded={expanded === task.id}
                   isCurrent={task.id === currentTaskId}
                   onToggle={() => setExpanded(expanded === task.id ? null : task.id)}
+                  onStopTask={onStopTask}
                   index={index}
                 />
               ))
@@ -67,8 +69,9 @@ export default function TaskHistory({ tasks, currentTaskId }) {
   )
 }
 
-function TaskItem({ task, isExpanded, isCurrent, onToggle, index }) {
+function TaskItem({ task, isExpanded, isCurrent, onToggle, onStopTask, index }) {
   const config = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending
+  const canStop = task.status === 'pending' || task.status === 'running'
 
   return (
     <motion.div
@@ -94,6 +97,18 @@ function TaskItem({ task, isExpanded, isCurrent, onToggle, index }) {
           <div className={`px-2 py-0.5 ${config.bg} border ${config.border} rounded text-xs font-mono ${config.color} flex-shrink-0`}>
             {config.label}
           </div>
+          {canStop && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onStopTask?.(task.id)
+              }}
+              className="px-2 py-0.5 bg-red-500/20 border border-red-500 rounded text-xs font-mono text-red-400 hover:bg-red-500/30 transition-all flex-shrink-0"
+            >
+              停止
+            </button>
+          )}
         </div>
 
         {/* Expanded Details */}

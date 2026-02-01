@@ -64,7 +64,7 @@ export default function ControlPanel({ onCreateTask, onStopTask, currentTask, ve
 
           <button
             type="button"
-            onClick={onStopTask}
+            onClick={() => onStopTask()}
             disabled={!currentTask}
             className="neon-button relative px-6 py-3 bg-gradient-to-r from-red-500 to-orange-600 text-white font-display font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none transition-all uppercase tracking-wider text-sm"
           >
