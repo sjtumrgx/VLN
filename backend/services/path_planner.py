@@ -40,7 +40,14 @@ class PathPlanner:
         # 目标点：根据VLM的goal_direction计算
         goal_dir = vllm_output.goal_direction
         azimuth = np.deg2rad(goal_dir.get("azimuth", 0))  # 方位角（度转弧度）
-        distance = goal_dir.get("distance", 3.0)  # 距离（米）
+        distance = float(goal_dir.get("distance", 3.0) or 0.0)  # 距离（米）
+
+        # 距离兜底：模型偶发输出 distance<=0 时，会导致轨迹过短/不变化，并触发误判到达。
+        # reached_goal=true 则允许 distance 为 0（表示停止）。
+        if not vllm_output.reached_goal:
+            if distance <= 0:
+                distance = 3.0
+            distance = max(distance, 0.5)
 
         # 将实际距离映射到图像像素（简化映射：1米 ≈ 100像素）
         pixel_distance = min(distance * 100, self.image_height * 0.7)
@@ -59,7 +66,7 @@ class PathPlanner:
         )
 
         # 计算速度指令
-        v, w = self._compute_velocity(waypoints, vllm_output.obstacles)
+        v, w = self._compute_velocity(waypoints, vllm_output)
 
         return Trajectory(
             waypoints=waypoints,
@@ -113,18 +120,22 @@ class PathPlanner:
 
         return points
 
-    def _compute_velocity(self, waypoints: list, obstacles: list) -> Tuple[float, float]:
+    def _compute_velocity(self, waypoints: list, vllm_output: VLLMResponse) -> Tuple[float, float]:
         """
         计算线速度和角速度（动态窗口法简化版）
 
         Args:
             waypoints: 航点列表
-            obstacles: 障碍物列表
+            vllm_output: vLLM推理输出
 
         Returns:
             (v, w) 线速度和角速度
         """
         if not waypoints or len(waypoints) < 2:
+            return 0.0, 0.0
+
+        # reached_goal 由模型显式判断：优先级最高
+        if vllm_output.reached_goal:
             return 0.0, 0.0
 
         # 第一个航点（执行目标）
@@ -136,15 +147,12 @@ class PathPlanner:
         dy = second_wp.y - first_wp.y
         target_angle = np.arctan2(dx, -dy)  # 图像坐标系y轴向下
 
-        # 计算距离（像素转米）
-        pixel_dist = np.sqrt(dx**2 + dy**2)
-        meter_dist = pixel_dist / 100.0  # 1米 ≈ 100像素
-
-        # 基础线速度（根据距离调整）
-        v = min(self.max_v, meter_dist / 2.0)
+        # 使用“总距离”估计线速度（避免首段过短导致误判到达）
+        total_meter_dist = float(getattr(waypoints[-1], "distance", 0.0) or 0.0)
+        v = min(self.max_v, total_meter_dist / 2.0)
 
         # 根据障碍物调整速度
-        for obs in obstacles:
+        for obs in vllm_output.obstacles:
             obs_dist = obs.get("distance", 10.0)
             if obs_dist < 1.0:  # 距离障碍物<1米，减速
                 v *= 0.5
@@ -153,10 +161,5 @@ class PathPlanner:
 
         # 角速度（根据方向偏差）
         w = np.clip(target_angle * 0.5, -self.max_w, self.max_w)
-
-        # 如果到达目标（VLM判断），停止
-        if meter_dist < 0.3:
-            v = 0.0
-            w = 0.0
 
         return float(v), float(w)
