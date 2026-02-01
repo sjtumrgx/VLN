@@ -38,13 +38,17 @@ class Settings(BaseSettings):
     SQLITE_DB_PATH: str = Field(default="./data/vln.db", description="SQLite数据库路径")
 
     # 性能配置
-    VIDEO_INFERENCE_FPS: int = Field(default=10, description="视频推理帧率")
-    VIDEO_STREAM_RESOLUTION_WIDTH: int = Field(default=640, description="视频流宽度")
-    VIDEO_STREAM_RESOLUTION_HEIGHT: int = Field(default=480, description="视频流高度")
+    VIDEO_INFERENCE_FPS: int = Field(default=5, description="视频推理帧率")
+    VIDEO_STREAM_RESOLUTION_WIDTH: int = Field(default=384, description="视频流宽度")
+    VIDEO_STREAM_RESOLUTION_HEIGHT: int = Field(default=288, description="视频流高度")
     FRAME_SKIP_RATIO: int = Field(default=3, description="帧跳过比率")
     WEBSOCKET_MAX_QUEUE_SIZE: int = Field(default=5, description="WebSocket最大队列大小")
     GPU_MEMORY_UTILIZATION: float = Field(default=0.95, description="GPU显存利用率")
     TENSOR_PARALLEL_SIZE: int = Field(default=4, description="张量并行大小")
+
+    # vLLM推理参数
+    VLLM_MAX_TOKENS: int = Field(default=128, description="vLLM生成token上限（越小越快）")
+    VLLM_IMAGE_JPEG_QUALITY: int = Field(default=65, description="发送到vLLM的JPEG质量(1-100)")
 
     # 路径规划配置
     NUM_WAYPOINTS: int = Field(default=12, description="航点数量")

@@ -1,5 +1,6 @@
 """Task management API endpoints"""
 
+import logging
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -9,6 +10,7 @@ from backend.storage.sqlite_client import SQLiteClient
 from backend.config import settings
 
 router = APIRouter(tags=["tasks"])
+logger = logging.getLogger(__name__)
 
 # 延迟初始化，在main.py中注入
 _db: SQLiteClient = None
@@ -67,6 +69,16 @@ async def update_task(task_id: str, req: TaskUpdate):
         raise HTTPException(status_code=400, detail="No fields to update")
 
     await db.update_task(task_id, updates)
+
+    # 兜底：即使 WS stop_task 因为帧堆积被排队，REST 停止也应能立即终止后端推理流水线
+    if updates.get("status") == TaskStatus.STOPPED:
+        try:
+            from backend.websocket.video_stream import pipeline
+
+            await pipeline.stop_task(task_id)
+        except Exception as e:
+            logger.warning(f"停止推理流水线失败: {e}")
+
     return {"status": "updated", "task_id": task_id}
 
 

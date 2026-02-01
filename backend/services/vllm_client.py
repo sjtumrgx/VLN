@@ -16,27 +16,19 @@ from backend.models.navigation import VLLMResponse
 logger = logging.getLogger(__name__)
 
 # Prompt模板
-NAVIGATION_PROMPT = """You are a navigation assistant for a quadruped robot.
+NAVIGATION_PROMPT = """Task: {instruction}
+Context: {memory}
 
-Task: {instruction}
+Return ONLY valid JSON (no markdown, no extra text). Rules:
+- If reached_goal is false, goal_direction.distance MUST be > 0.
+- distance is in meters; azimuth is in degrees.
 
-Previous context: {memory}
-
-Analyze the current view and provide navigation guidance.
-Your response MUST be valid JSON in this exact format:
 {{
-  "spatial_analysis": "描述当前场景的空间理解",
-  "action": "move_forward|turn_left|turn_right|reached_goal",
-  "goal_direction": {{"azimuth": 45, "distance": 3.5}},
-  "obstacles": [
-    {{"type": "wall", "position": "left", "distance": 2.0}},
-    {{"type": "furniture", "position": "front-right", "distance": 1.5}}
-  ],
-  "confidence": 0.85,
+  "goal_direction": {{"azimuth": 0, "distance": 3}},
+  "obstacles": [{{"distance": 2.0}}],
+  "confidence": 0.0,
   "reached_goal": false
-}}
-
-CRITICAL: Output ONLY valid JSON, no additional text before or after."""
+}}"""
 
 
 class VLLMClient:
@@ -46,15 +38,30 @@ class VLLMClient:
         self.api_url = api_url or settings.VLLM_API_URL
         self.model_name = "qwen3-vl"
         self.timeout = 30.0
+        self._client = httpx.AsyncClient(timeout=self.timeout)
 
     def _encode_image(self, image: np.ndarray) -> str:
         """将numpy图像编码为base64"""
         # 转换为PIL Image
         img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         buffered = BytesIO()
-        img.save(buffered, format="JPEG", quality=85)
+        img.save(buffered, format="JPEG", quality=settings.VLLM_IMAGE_JPEG_QUALITY)
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{img_str}"
+
+    @staticmethod
+    def _to_data_url_from_b64(frame_b64: str) -> str:
+        return f"data:image/jpeg;base64,{frame_b64}"
+
+    def _build_prompt(self, instruction: str, memory: str) -> str:
+        return NAVIGATION_PROMPT.format(
+            instruction=instruction,
+            memory=memory or "none",
+        )
+
+    async def aclose(self):
+        """关闭http客户端连接（可选，便于优雅退出）"""
+        await self._client.aclose()
 
     async def analyze_frame(
         self, image: np.ndarray, instruction: str, memory: str = ""
@@ -70,60 +77,66 @@ class VLLMClient:
         Returns:
             VLLMResponse or None if error
         """
-        try:
-            # 编码图像
-            image_url = self._encode_image(image)
+        image_url = self._encode_image(image)
+        return await self._analyze_image_url(image_url=image_url, instruction=instruction, memory=memory)
 
-            # 构造prompt
-            prompt = NAVIGATION_PROMPT.format(
-                instruction=instruction, memory=memory or "无历史记录"
-            )
+    async def analyze_frame_b64(
+        self, frame_b64: str, instruction: str, memory: str = ""
+    ) -> Optional[VLLMResponse]:
+        """直接使用浏览器上传的JPEG base64做推理，避免后端解码/重编码开销"""
+        image_url = self._to_data_url_from_b64(frame_b64)
+        return await self._analyze_image_url(image_url=image_url, instruction=instruction, memory=memory)
+
+    async def _analyze_image_url(
+        self, image_url: str, instruction: str, memory: str = ""
+    ) -> Optional[VLLMResponse]:
+        try:
+            prompt = self._build_prompt(instruction=instruction, memory=memory)
 
             # 调用vLLM API (OpenAI格式)
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.api_url}/v1/chat/completions",
-                    json={
-                        "model": self.model_name,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {"type": "image_url", "image_url": {"url": image_url}},
-                                ],
-                            }
-                        ],
-                        "max_tokens": 512,
-                        "temperature": 0.1,
-                    },
+            response = await self._client.post(
+                f"{self.api_url}/v1/chat/completions",
+                json={
+                    "model": self.model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                            ],
+                        }
+                    ],
+                    "max_tokens": settings.VLLM_MAX_TOKENS,
+                    "temperature": 0.0,
+                },
+            )
+
+            if response.status_code != 200:
+                logger.error(f"vLLM API错误: {response.status_code} - {response.text}")
+                return None
+
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+
+            # 解析JSON响应
+            try:
+                # 尝试提取JSON（防止模型输出多余文本）
+                json_start = content.find("{")
+                json_end = content.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    content = content[json_start:json_end]
+
+                parsed = json.loads(content)
+                return VLLMResponse(**parsed)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}\n内容: {content}")
+                # 返回默认响应
+                return VLLMResponse(
+                    spatial_analysis="无法解析模型输出",
+                    action="move_forward",
+                    confidence=0.0,
                 )
-
-                if response.status_code != 200:
-                    logger.error(f"vLLM API错误: {response.status_code} - {response.text}")
-                    return None
-
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-
-                # 解析JSON响应
-                try:
-                    # 尝试提取JSON（防止模型输出多余文本）
-                    json_start = content.find("{")
-                    json_end = content.rfind("}") + 1
-                    if json_start >= 0 and json_end > json_start:
-                        content = content[json_start:json_end]
-
-                    parsed = json.loads(content)
-                    return VLLMResponse(**parsed)
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON解析失败: {e}\n内容: {content}")
-                    # 返回默认响应
-                    return VLLMResponse(
-                        spatial_analysis="无法解析模型输出",
-                        action="move_forward",
-                        confidence=0.0,
-                    )
 
         except httpx.TimeoutException:
             logger.error("vLLM请求超时")
@@ -135,9 +148,8 @@ class VLLMClient:
     async def check_health(self) -> bool:
         """检查vLLM服务健康状态"""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{self.api_url}/health")
-                return response.status_code == 200
+            response = await self._client.get(f"{self.api_url}/health", timeout=5.0)
+            return response.status_code == 200
         except Exception:
             return False
 

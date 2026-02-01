@@ -1,17 +1,14 @@
 """WebSocket video stream handler"""
 
-import asyncio
-import base64
 import json
 import logging
 from datetime import datetime
 from typing import Dict
 
-import cv2
-import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
-from backend.config import settings
+from backend.models.task import TaskStatus
+from backend.websocket.inference_pipeline import InferencePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +61,16 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _get_db():
+    from backend.main import db
+
+    return db
+
+
+# 推理流水线：latest-frame-only
+pipeline = InferencePipeline(send_to_client=manager.send_to_client, get_db=_get_db)
+
+
 async def handle_video_stream(websocket: WebSocket, client_id: str):
     """处理视频流WebSocket连接"""
     await manager.connect(client_id, websocket)
@@ -77,18 +84,63 @@ async def handle_video_stream(websocket: WebSocket, client_id: str):
             msg_type = message.get("type")
 
             if msg_type == "video_frame":
-                # 处理视频帧
-                await process_video_frame(message, client_id)
+                task_id = message.get("task_id")
+                frame_b64 = message.get("frame")
+                frame_seq = int(message.get("frame_seq", 0))
+                timestamp_ms = int(message.get("timestamp", 0))
+                instruction = message.get("instruction", "向前移动")
+
+                if not task_id or not frame_b64:
+                    continue
+
+                await pipeline.submit_frame(
+                    task_id=task_id,
+                    client_id=client_id,
+                    frame_b64=frame_b64,
+                    frame_seq=frame_seq,
+                    timestamp_ms=timestamp_ms,
+                    instruction=instruction,
+                )
 
             elif msg_type == "bind_task":
                 # 绑定任务
                 task_id = message.get("task_id")
                 if task_id:
                     manager.bind_task(client_id, task_id)
+                    # 绑定即视为任务开始运行：写库更新状态（DB为真源）
+                    try:
+                        from backend.main import db
+
+                        if db:
+                            await db.update_task(task_id, {"status": TaskStatus.RUNNING})
+                    except Exception as e:
+                        logger.warning(f"bind_task 更新任务状态失败: {e}")
+                    await pipeline.bind_task(task_id=task_id, client_id=client_id)
                     await manager.send_to_client(
                         client_id,
                         {
                             "type": "task_bound",
+                            "task_id": task_id,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
+
+            elif msg_type == "stop_task":
+                task_id = message.get("task_id")
+                if task_id:
+                    try:
+                        from backend.main import db
+
+                        if db:
+                            await db.update_task(task_id, {"status": TaskStatus.STOPPED})
+                    except Exception as e:
+                        logger.warning(f"stop_task 更新任务状态失败: {e}")
+
+                    await pipeline.stop_task(task_id)
+                    await manager.send_to_client(
+                        client_id,
+                        {
+                            "type": "task_stopped",
                             "task_id": task_id,
                             "timestamp": datetime.now().isoformat(),
                         },
@@ -102,116 +154,9 @@ async def handle_video_stream(websocket: WebSocket, client_id: str):
                 )
 
     except WebSocketDisconnect:
+        await pipeline.disconnect_client(client_id)
         manager.disconnect(client_id)
     except Exception as e:
         logger.error(f"WebSocket错误: {e}")
+        await pipeline.disconnect_client(client_id)
         manager.disconnect(client_id)
-
-
-async def process_video_frame(message: dict, client_id: str):
-    """处理视频帧 - 完整pipeline"""
-    from backend.services.vllm_client import VLLMClient
-    from backend.services.path_planner import PathPlanner
-    from backend.services.memory_manager import MemoryManager
-    from backend.utils.visualization import draw_trajectory_on_frame
-    from backend.main import db
-
-    task_id = message.get("task_id")
-    frame_b64 = message.get("frame")
-    timestamp = message.get("timestamp", 0)
-    instruction = message.get("instruction", "向前移动")
-
-    if not frame_b64:
-        return
-
-    try:
-        # 解码图像
-        frame_bytes = base64.b64decode(frame_b64)
-        nparr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if frame is None:
-            logger.warning("无效的图像帧")
-            return
-
-        # 初始化服务（延迟初始化，避免循环导入）
-        vllm_client = VLLMClient()
-        path_planner = PathPlanner()
-        memory_manager = MemoryManager(db) if db else None
-
-        # 获取任务记忆
-        memory = ""
-        if memory_manager and task_id:
-            memory = await memory_manager.get_task_memory(task_id)
-
-        # 1. vLLM推理
-        vllm_result = await vllm_client.analyze_frame(frame, instruction, memory)
-
-        if vllm_result is None:
-            # vLLM推理失败，返回原始帧
-            logger.warning("vLLM推理失败，返回原始帧")
-            _, buffer = cv2.imencode(".jpg", frame)
-            processed_frame_b64 = base64.b64encode(buffer).decode("utf-8")
-
-            await manager.send_to_client(
-                client_id,
-                {
-                    "type": "navigation_result",
-                    "task_id": task_id,
-                    "frame_with_trajectory": processed_frame_b64,
-                    "v": 0.0,
-                    "w": 0.0,
-                    "waypoints": [],
-                    "timestamp": datetime.now().timestamp() * 1000,
-                    "latency": datetime.now().timestamp() * 1000 - timestamp,
-                    "error": "vLLM inference failed",
-                },
-            )
-            return
-
-        # 2. 路径规划
-        trajectory = path_planner.plan(vllm_result)
-
-        # 3. 绘制轨迹
-        frame_with_traj = draw_trajectory_on_frame(frame, trajectory)
-
-        # 4. 编码图像
-        _, buffer = cv2.imencode(".jpg", frame_with_traj, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        processed_frame_b64 = base64.b64encode(buffer).decode("utf-8")
-
-        # 5. 保存轨迹到数据库
-        if db and task_id:
-            await db.save_trajectory(task_id, trajectory)
-
-        # 6. 更新记忆
-        if memory_manager and task_id:
-            await memory_manager.update_memory(task_id, vllm_result.spatial_analysis)
-
-        # 7. 发送结果
-        await manager.send_to_client(
-            client_id,
-            {
-                "type": "navigation_result",
-                "task_id": task_id,
-                "frame_with_trajectory": processed_frame_b64,
-                "v": trajectory.v,
-                "w": trajectory.w,
-                "waypoints": [
-                    {"x": wp.x, "y": wp.y, "distance": wp.distance}
-                    for wp in trajectory.waypoints
-                ],
-                "confidence": trajectory.confidence,
-                "reached_goal": vllm_result.reached_goal,
-                "spatial_analysis": vllm_result.spatial_analysis,
-                "timestamp": datetime.now().timestamp() * 1000,
-                "latency": datetime.now().timestamp() * 1000 - timestamp,
-            },
-        )
-
-        logger.info(
-            f"处理完成: v={trajectory.v:.2f}, w={trajectory.w:.2f}, "
-            f"conf={trajectory.confidence:.2f}"
-        )
-
-    except Exception as e:
-        logger.error(f"处理视频帧错误: {e}", exc_info=True)

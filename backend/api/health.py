@@ -21,4 +21,6 @@ async def get_config():
         "video_resolution": settings.video_resolution,
         "inference_fps": settings.VIDEO_INFERENCE_FPS,
         "num_waypoints": settings.NUM_WAYPOINTS,
+        "vllm_max_tokens": settings.VLLM_MAX_TOKENS,
+        "vllm_image_jpeg_quality": settings.VLLM_IMAGE_JPEG_QUALITY,
     }

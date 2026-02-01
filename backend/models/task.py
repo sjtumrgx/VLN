@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    STOPPED = "stopped"
     COMPLETED = "completed"
     FAILED = "failed"
 
